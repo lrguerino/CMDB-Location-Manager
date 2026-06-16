@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sysevent_queue">
+    <sysevent_queue action="INSERT_OR_UPDATE">
+        <automatic_processing>true</automatic_processing>
+        <description>Handles CMDB location hierarchy sync events, routes stla.cmdb.location.hierarchy.sync and stla.cmdb.location.structure.changed events for asynchronous processing.</description>
+        <job_config>jobs_per_node</job_config>
+        <job_config_value>1</job_config_value>
+        <poll_interval>1970-01-01 00:00:15</poll_interval>
+        <processing_order>parallel</processing_order>
+        <provider display_value="Event Provider">44af4464431212108da9a574a9b8f2f5</provider>
+        <queue>x_441902_cmdb_lo_0.stla_cmdb_location_sy</queue>
+        <suffix>stla_cmdb_location_sy</suffix>
+        <sys_class_name>sysevent_queue</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-06-15 13:51:30</sys_created_on>
+        <sys_id>205be83c83a98314fe4fc065eeaad3dc</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_441902_cmdb_lo_0.stla_cmdb_location_sy</sys_name>
+        <sys_package display_value="CMDB Location Manager" source="x_441902_cmdb_lo_0">6af9ac7883a98314fe4fc065eeaad3f6</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CMDB Location Manager">6af9ac7883a98314fe4fc065eeaad3f6</sys_scope>
+        <sys_update_name>sysevent_queue_205be83c83a98314fe4fc065eeaad3dc</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-06-15 13:51:30</sys_updated_on>
+    </sysevent_queue>
+</record_update>

@@ -1,0 +1,310 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>public</access>
+        <active>true</active>
+        <api_name>x_441902_cmdb_lo_0.STLACMDBLocationSync</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description>Orchestrates CMDB location hierarchy sync operations.&#13;
+Owns the event names, dedicated queue, and all CMDB interaction for this feature:&#13;
+&#13;
+- syncCI: queue a hierarchy re-sync event for a single CI&#13;
+- syncLocation: queue a location structure-change event — consumed asynchronously by the Script Action&#13;
+- syncAffectedCIs: fan out to all CIs referencing a location (direct or via u_* fields) and queue a sync event for each — called by the Script Action&#13;
+- applyHierarchy: translate a resolved hierarchy object to cmdb_ci field values and save the CI — skips update if no fields changed&#13;
+- refresh: five location-type-based catch-up queries plus a catch-all for non-standard location types (e.g. plant, factory), for CIs with missing u_* fields — used by the Scheduled Job</description>
+        <mobile_callable>false</mobile_callable>
+        <name>STLACMDBLocationSync</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var STLACMDBLocationSync = Class.create();
+STLACMDBLocationSync.prototype = {
+
+    EVENT_CI_SYNC: "x_441902_cmdb_lo_0.stla.cmdb.location.hi",
+    EVENT_LOCATION_CHANGED: "x_441902_cmdb_lo_0.stla.cmdb.location.st",
+    QUEUE: "stla_cmdb_location_sync",
+    CMDB_TABLE: "cmdb_ci",
+    LIFECYCLE_STAGE_OPERATIONAL: "Operational",
+    LIFECYCLE_STAGE_STATUS_IN_USE: "In Use",
+
+    LOCATION_TYPES: {
+        REGION: "region",
+        COUNTRY: "country",
+        SITE: "site",
+        BUILDING: "building/structure",
+        ROOM: "room",
+    },
+
+    CMDB_FIELDS: {
+        REGION: "u_region",
+        COUNTRY: "u_country",
+        SITE: "u_site",
+        BUILDING: "u_building",
+        ROOM: "u_room",
+    },
+
+    initialize: function () { },
+
+    /**
+     * Queues a hierarchy sync event for a single CI.
+     * Picked up asynchronously by STLA_CMDB Location Hierarchy Sync Script Action,
+     * which resolves and writes the u_* location fields on that CI.
+     * No-op if ciRecord is null or not a valid record.
+     *
+     * @param {GlideRecord} ciRecord   cmdb_ci record requiring re-sync
+     */
+    syncCI: function (ciRecord) {
+        if (gs.nil(ciRecord)) {
+            gs.warn("STLACMDBLocationSync.syncCI: called with null record — skipping");
+            return;
+        }
+        if (!ciRecord.isValidRecord()) {
+            gs.warn("STLACMDBLocationSync.syncCI: called with invalid record — skipping");
+            return;
+        }
+        gs.eventQueue(
+            this.EVENT_CI_SYNC,
+            ciRecord,
+            ciRecord.getUniqueValue(),
+            ciRecord.getValue("location") || "",
+            this.QUEUE
+        );
+    },
+
+    /**
+     * Queues a location structure-change event for the given location record.
+     * Picked up asynchronously by STLA_Location Change - Sync CIs Script Action,
+     * which fans out a sync event for every CI referencing this location.
+     * No-op if locationRecord is null or not a valid record.
+     *
+     * @param {GlideRecord} locationRecord   cmn_location record that changed
+     */
+    syncLocation: function (locationRecord) {
+        if (gs.nil(locationRecord)) {
+            gs.warn("STLACMDBLocationSync.syncLocation: called with null record — skipping");
+            return;
+        }
+        if (!locationRecord.isValidRecord()) {
+            gs.warn("STLACMDBLocationSync.syncLocation: called with invalid record — skipping");
+            return;
+        }
+        gs.eventQueue(
+            this.EVENT_LOCATION_CHANGED,
+            locationRecord,
+            locationRecord.getUniqueValue(),
+            locationRecord.getValue("name") || "",
+            this.QUEUE
+        );
+    },
+
+    /**
+     * Finds all CIs that reference the given location — either directly via the
+     * location field or through any u_* hierarchy field (u_region, u_country,
+     * u_site, u_building, u_room) — and queues a hierarchy sync event for each.
+     * Called by STLA_Location Change - Sync CIs Script Action when key location
+     * attributes change.
+     * No-op if locationRecord is null or not a valid record.
+     *
+     * @param {GlideRecord} locationRecord   cmn_location record that changed
+     */
+    syncAffectedCIs: function (locationRecord) {
+        if (gs.nil(locationRecord)) {
+            gs.warn("STLACMDBLocationSync.syncAffectedCIs: called with null record — skipping");
+            return;
+        }
+        if (!locationRecord.isValidRecord()) {
+            gs.warn("STLACMDBLocationSync.syncAffectedCIs: called with invalid record — skipping");
+            return;
+        }
+        var locationSysId = locationRecord.getUniqueValue();
+        var ciRecord = new GlideRecord(this.CMDB_TABLE);
+        var qc = ciRecord.addQuery("location", locationSysId);
+        qc.addOrCondition(this.CMDB_FIELDS.REGION, locationSysId);
+        qc.addOrCondition(this.CMDB_FIELDS.COUNTRY, locationSysId);
+        qc.addOrCondition(this.CMDB_FIELDS.SITE, locationSysId);
+        qc.addOrCondition(this.CMDB_FIELDS.BUILDING, locationSysId);
+        qc.addOrCondition(this.CMDB_FIELDS.ROOM, locationSysId);
+        ciRecord.query();
+        while (ciRecord.next()) {
+            this.syncCI(ciRecord);
+        }
+    },
+
+    /**
+     * Translates a resolved hierarchy object from STLALocationHierarchyResolver.getHierarchy()
+     * into cmdb_ci field values and saves the record.
+     * Maps each hierarchy level's sys_id to its corresponding u_* reference field,
+     * and the site's location_code to u_site_code.
+     * Levels absent from the hierarchy result in the corresponding field being cleared.
+     * If all field values are already correct, the record is not updated —
+     * avoiding unnecessary sys_updated_on changes on CIs that are already in sync.
+     *
+     * @param {GlideRecord} ciRecord    cmdb_ci record to update
+     * @param {Object}      hierarchy   object returned by STLALocationHierarchyResolver.getHierarchy()
+     */
+    applyHierarchy: function (ciRecord, hierarchy) {
+        if (gs.nil(ciRecord)) {
+            gs.warn("STLACMDBLocationSync.applyHierarchy: ciRecord is null — skipping");
+            return;
+        }
+        if (!ciRecord.isValidRecord()) {
+            gs.warn("STLACMDBLocationSync.applyHierarchy: ciRecord is not a valid record — skipping");
+            return;
+        }
+        if (gs.nil(hierarchy) || typeof hierarchy !== "object") {
+            gs.warn("STLACMDBLocationSync.applyHierarchy: hierarchy is null or not an object — skipping");
+            return;
+        }
+        var fieldMap = {
+            region: this.CMDB_FIELDS.REGION,
+            country: this.CMDB_FIELDS.COUNTRY,
+            site: this.CMDB_FIELDS.SITE,
+            building: this.CMDB_FIELDS.BUILDING,
+            room: this.CMDB_FIELDS.ROOM
+        };
+        var changed = false;
+        for (var level in fieldMap) {
+            var field = fieldMap[level];
+            if (ciRecord.isValidField(field)) {
+                // "" when the level is absent from the hierarchy (e.g. no site in chain) — clears the field
+                var newValue = !gs.nil(hierarchy[level]) ? hierarchy[level].sys_id : "";
+                // || "" normalises null (empty reference field) to "" so the comparison is type-safe
+                if ((ciRecord.getValue(field) || "") !== newValue) {
+                    ciRecord.setValue(field, newValue);
+                    changed = true;
+                }
+            }
+        }
+        if (ciRecord.isValidField("u_site_code")) {
+            var newSiteCode = !gs.nil(hierarchy.site) ? hierarchy.site.location_code : "";
+            if ((ciRecord.getValue("u_site_code") || "") !== newSiteCode) {
+                ciRecord.setValue("u_site_code", newSiteCode);
+                changed = true;
+            }
+        }
+        // only update if at least one field actually changed — avoids unnecessary
+        // sys_updated_on changes on CIs that are re-queued but already in sync
+        if (changed) {
+            ciRecord.update();
+        }
+    },
+
+    /**
+	 * Catches up CIs whose location hierarchy fields are out of date.
+	 * Runs five targeted queries — one per location type — and queues a
+	 * hierarchy sync event for each CI that has an active location of that
+	 * type but is missing one or more of the expected u_* fields.
+	 * A sixth catch-all query covers CIs on non-standard location types
+	 * (e.g. plant, factory) that are not covered by the five typed queries,
+	 * using u_region as the sync signal.
+	 *
+	 * Region CIs:   must have u_region
+	 * Country CIs:  must have u_region + u_country
+	 * Site CIs:     must have u_region + u_country + u_site
+	 * Building CIs: must have u_region + u_country + u_site + u_building
+	 * Room CIs:     must have all five u_* fields
+	 * Other CIs:    must have u_region
+	 *
+	 * Used by the STLA_CMDB Location Hierarchy Sync Job scheduled job.
+	 * Safe to call manually at any time for backfill or catch-up.
+	 */
+    refresh: function () {
+        var typeChecks = [
+            {
+                type: this.LOCATION_TYPES.REGION,
+                fields: [this.CMDB_FIELDS.REGION],
+            },
+            {
+                type: this.LOCATION_TYPES.COUNTRY,
+                fields: [this.CMDB_FIELDS.REGION, this.CMDB_FIELDS.COUNTRY],
+            },
+            {
+                type: this.LOCATION_TYPES.SITE,
+                fields: [
+                    this.CMDB_FIELDS.REGION,
+                    this.CMDB_FIELDS.COUNTRY,
+                    this.CMDB_FIELDS.SITE,
+                ],
+            },
+            {
+                type: this.LOCATION_TYPES.BUILDING,
+                fields: [
+                    this.CMDB_FIELDS.REGION,
+                    this.CMDB_FIELDS.COUNTRY,
+                    this.CMDB_FIELDS.SITE,
+                    this.CMDB_FIELDS.BUILDING,
+                ],
+            },
+            {
+                type: this.LOCATION_TYPES.ROOM,
+                fields: [
+                    this.CMDB_FIELDS.REGION,
+                    this.CMDB_FIELDS.COUNTRY,
+                    this.CMDB_FIELDS.SITE,
+                    this.CMDB_FIELDS.BUILDING,
+                    this.CMDB_FIELDS.ROOM,
+                ],
+            },
+        ];
+        for (var i = 0; i < typeChecks.length; i++) {
+            this._refreshForType(typeChecks[i].type, typeChecks[i].fields);
+        }
+        this._refreshForUnknownTypes();
+    },
+
+    // ------------------------------------------------------------------ //
+    // PRIVATE                                                            //
+    // ------------------------------------------------------------------ //
+
+    _refreshForType: function (locationType, requiredFields) {
+        var nullConditions = [];
+        for (var i = 0; i < requiredFields.length; i++) {
+            nullConditions.push(requiredFields[i] + "ISEMPTY");
+        }
+        var ciRecord = new GlideRecord(this.CMDB_TABLE);
+        ciRecord.addNotNullQuery("location");
+        ciRecord.addQuery("location.life_cycle_stage", this.LIFECYCLE_STAGE_OPERATIONAL);
+        ciRecord.addQuery("location.life_cycle_stage_status", this.LIFECYCLE_STAGE_STATUS_IN_USE);
+        ciRecord.addQuery("location.cmn_location_type", locationType);
+        ciRecord.addEncodedQuery(nullConditions.join("^OR"));
+        ciRecord.query();
+        while (ciRecord.next()) {
+            this.syncCI(ciRecord);
+        }
+    },
+
+    _refreshForUnknownTypes: function () {
+        var knownTypes = [
+            this.LOCATION_TYPES.REGION,
+            this.LOCATION_TYPES.COUNTRY,
+            this.LOCATION_TYPES.SITE,
+            this.LOCATION_TYPES.BUILDING,
+            this.LOCATION_TYPES.ROOM,
+        ].join(",");
+        var ciRecord = new GlideRecord(this.CMDB_TABLE);
+        ciRecord.addNotNullQuery("location");
+        ciRecord.addQuery("location.life_cycle_stage", this.LIFECYCLE_STAGE_OPERATIONAL);
+        ciRecord.addQuery("location.life_cycle_stage_status", this.LIFECYCLE_STAGE_STATUS_IN_USE);
+        ciRecord.addEncodedQuery("location.cmn_location_typeNOT IN" + knownTypes);
+        ciRecord.addNullQuery(this.CMDB_FIELDS.REGION);
+        ciRecord.query();
+        while (ciRecord.next()) {
+            this.syncCI(ciRecord);
+        }
+    },
+
+    type: "STLACMDBLocationSync"
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-06-15 13:48:07</sys_created_on>
+        <sys_id>7c4a28b883a98314fe4fc065eeaad3b3</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>STLACMDBLocationSync</sys_name>
+        <sys_package display_value="CMDB Location Manager" source="x_441902_cmdb_lo_0">6af9ac7883a98314fe4fc065eeaad3f6</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CMDB Location Manager">6af9ac7883a98314fe4fc065eeaad3f6</sys_scope>
+        <sys_update_name>sys_script_include_7c4a28b883a98314fe4fc065eeaad3b3</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-06-16 12:20:03</sys_updated_on>
+    </sys_script_include>
+</record_update>

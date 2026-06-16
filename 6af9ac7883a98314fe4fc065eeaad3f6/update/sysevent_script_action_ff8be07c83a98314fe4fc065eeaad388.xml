@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sysevent_script_action">
+    <sysevent_script_action action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <condition_script>!gs.nil(current);</condition_script>
+        <description/>
+        <event_name>stla.cmdb.location.hierarchy.sync</event_name>
+        <name>STLA_CMDB Location Hierarchy Sync</name>
+        <order>100</order>
+        <script><![CDATA[(function (ciRecord) {
+    var hierarchy = new STLALocationHierarchyResolver(
+		ciRecord.getValue("location")
+	).getHierarchy();
+    new STLACMDBLocationSync().applyHierarchy(ciRecord, hierarchy);
+})(current);]]></script>
+        <synchronous>false</synchronous>
+        <sys_class_name>sysevent_script_action</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-06-15 14:37:04</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>ff8be07c83a98314fe4fc065eeaad388</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>STLA_CMDB Location Hierarchy Sync</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CMDB Location Manager" source="x_441902_cmdb_lo_0">6af9ac7883a98314fe4fc065eeaad3f6</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CMDB Location Manager">6af9ac7883a98314fe4fc065eeaad3f6</sys_scope>
+        <sys_update_name>sysevent_script_action_ff8be07c83a98314fe4fc065eeaad388</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-06-15 14:37:04</sys_updated_on>
+    </sysevent_script_action>
+</record_update>

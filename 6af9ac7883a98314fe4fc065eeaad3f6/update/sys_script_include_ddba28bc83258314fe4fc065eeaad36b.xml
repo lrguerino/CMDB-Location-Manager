@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>public</access>
+        <active>true</active>
+        <api_name>x_441902_cmdb_lo_0.STLALocationHierarchyResolver</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description>Resolves the location hierarchy for a given location sys_id. &#13;
+Traverses the parent chain bottom-up and returns a structured object with one entry per hierarchy level (region, country, site, building, room). &#13;
+&#13;
+Each entry contains sys_id, name, full_name, location_type, location_code and parent_sys_id. &#13;
+Levels not present in the chain are returned as "" (empty string). &#13;
+&#13;
+Inactive nodes (life_cycle_stage != Operational or life_cycle_stage_status != In Use) are skipped during traversal.&#13;
+&#13;
+Always returns a consistent object with all five keys. No CMDB or event knowledge — pure location utility.</description>
+        <mobile_callable>false</mobile_callable>
+        <name>STLALocationHierarchyResolver</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var STLALocationHierarchyResolver = Class.create();
+STLALocationHierarchyResolver.prototype = {
+
+    LOCATION_TABLE: "cmn_location",
+    MAX_DEPTH: 12,
+
+    LOCATION_TYPES: {
+        REGION: "region",
+        COUNTRY: "country",
+        SITE: "site",
+        BUILDING: "building/structure",
+        ROOM: "room"
+    },
+
+	LIFECYCLE_STAGE_OPERATIONAL: "Operational",
+	LIFECYCLE_STAGE_STATUS_IN_USE: "In Use",
+
+    /**
+     * Instantiates the resolver and loads the cmn_location record for the given sys_id.
+     * If the sys_id is absent or invalid, the instance is still safe to use —
+     * getHierarchy() will return an empty object.
+     *
+     * @param {String} locationSysId   sys_id of the cmn_location record to resolve
+     */
+    initialize: function (locationSysId) {
+        this._sysId = locationSysId;
+        this._locRecord = null;
+        this._found = false;
+        this._resolved = false;
+        this._result = this._emptyResult();
+        if (GlideStringUtil.isEligibleSysID(this._sysId)) {
+            this._locRecord = new GlideRecord(this.LOCATION_TABLE);
+            if (this._locRecord.get(this._sysId)) {
+                this._found = true;
+            }
+        }
+    },
+
+	/**
+	 * Traverses the location parent chain from the initialised sys_id upward,
+	 * mapping each node to its corresponding hierarchy level by cmn_location_type.
+	 *
+	 * Returns a structured object with one entry per hierarchy level.
+	 * Each entry contains: sys_id, name, full_name, location_type, location_code, parent_sys_id.
+	 * Levels not present in the chain are returned as "" (empty string).
+	 *
+	 * Traversal is bottom-up so the most specific node per type always wins.
+	 * Result is memoised — safe to call multiple times at zero extra cost.
+	 *
+	 * @returns {{
+	 *   region:   { sys_id, name, full_name, location_type, location_code, parent_sys_id } | "",
+	 *   country:  { sys_id, name, full_name, location_type, location_code, parent_sys_id } | "",
+	 *   site:     { sys_id, name, full_name, location_type, location_code, parent_sys_id } | "",
+	 *   building: { sys_id, name, full_name, location_type, location_code, parent_sys_id } | "",
+	 *   room:     { sys_id, name, full_name, location_type, location_code, parent_sys_id } | ""
+	 * }}
+	 */
+    getHierarchy: function () {
+        if (this._resolved) {
+            return this._result;
+        }
+        this._resolved = true;
+        if (!this._found) {
+            if (!gs.nil(this._sysId)) {
+                gs.warn("STLALocationHierarchyResolver.getHierarchy: location not found for sys_id: " + this._sysId);
+            }
+            return this._result;
+        }
+        this._traverse();
+        return this._result;
+    },
+
+    // ------------------------------------------------------------------ //
+    // PRIVATE                                                            //
+    // ------------------------------------------------------------------ //
+
+    _traverse: function () {
+        var depth = 0;
+        var truncated = true;
+        while (depth < this.MAX_DEPTH) {
+            this._mapNode();
+            var parentSysId = this._locRecord.getValue("parent");
+            depth++;
+            if (gs.nil(parentSysId) || !this._locRecord.get(parentSysId)) {
+                truncated = false;
+                break;
+            }
+        }
+        if (truncated) {
+            gs.warn("STLALocationHierarchyResolver._traverse: MAX_DEPTH of " + this.MAX_DEPTH +
+                " reached for location " + this._sysId + " — hierarchy may be incomplete");
+        }
+    },
+
+    _emptyResult: function () {
+        return {
+            region: "",
+            country: "",
+            site: "",
+            building: "",
+            room: ""
+        };
+    },
+
+    _buildNode: function () {
+        return {
+            sys_id: this._locRecord.getUniqueValue(),
+            name: this._locRecord.getValue("name") || "",
+			life_cycle_stage: this._locRecord.getValue("life_cycle_stage") || "",
+			life_cycle_stage_status: this._locRecord.getValue("life_cycle_stage_status") || "",
+            full_name: this._locRecord.getValue("full_name") || "",
+            location_type: this._locRecord.getValue("cmn_location_type") || "",
+            location_code: this._locRecord.getValue("u_location_code") || "",
+            parent_sys_id: this._locRecord.getValue("parent") || "",
+        };
+    },
+
+	_isActiveNode: function () {
+        return this._locRecord.getValue("life_cycle_stage") === this.LIFECYCLE_STAGE_OPERATIONAL &&
+               this._locRecord.getValue("life_cycle_stage_status") === this.LIFECYCLE_STAGE_STATUS_IN_USE;
+    },
+
+    _mapNode: function () {
+        var type = this._locRecord.getValue("cmn_location_type");
+        var types = this.LOCATION_TYPES;
+        var key = "";
+        if (type === types.REGION) {
+            key = "region";
+        }
+        else if (type === types.COUNTRY) {
+            key = "country";
+        }
+        else if (type === types.SITE) {
+            key = "site";
+        }
+        else if (type === types.BUILDING) {
+            key = "building";
+        }
+        else if (type === types.ROOM) {
+            key = "room";
+        }
+		// If we don't know what level this is, already have a node for this level or inactive location, do nothing.
+        if (gs.nil(key) || this._result[key] || !this._isActiveNode()) {
+            return;
+        }
+		this._result[key] = this._buildNode();
+    },
+
+    type: "STLALocationHierarchyResolver"
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-06-15 13:48:47</sys_created_on>
+        <sys_id>ddba28bc83258314fe4fc065eeaad36b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>STLALocationHierarchyResolver</sys_name>
+        <sys_package display_value="CMDB Location Manager" source="x_441902_cmdb_lo_0">6af9ac7883a98314fe4fc065eeaad3f6</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CMDB Location Manager">6af9ac7883a98314fe4fc065eeaad3f6</sys_scope>
+        <sys_update_name>sys_script_include_ddba28bc83258314fe4fc065eeaad36b</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-06-15 13:48:47</sys_updated_on>
+    </sys_script_include>
+</record_update>
